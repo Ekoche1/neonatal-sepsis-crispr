@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+
+# set -e
+# set -u
+# set -o pipefail
+# set -x
+
+
+usage() {
+	echo -e "\nUsage:"
+	echo -e "  $0 [-c <config file>] [-p <cas (optional)>] [-a <amplification method (optional)] [-m <method (optional)>] [-w <workflow>] [-o <output directory>] [-r <reference genbank file (optional)>] [-t <number of cpus (default 8)>]\n"
+	echo "Required:"
+	echo -e	"	-c	Config file specifying run parameters"
+	echo -e	"	-p	Cas nuclease to design gRNAs for (cas12 or cas13)"
+	echo -e	"	-a	Amplification method (rpa or pcr)"
+	echo -e "	-m	Guide/primer design method - one of the following:\n"
+	echo -e	"		  pangenome\t\tdesign guides from protein-coding regions"
+	echo -e	"		  kmer\t\t\tdesign guides using gene-agnostic approach\n"
+	echo -e	"	-w	Workflow - one of the following:\n"
+	echo -e "		Perform specific tasks"
+	echo -e	"		  check\t\t\t\tcheck number of NCBI assemblies available"
+	echo -e	"		  download_target\t\tonly download NCBI target genome assemblies"
+	echo -e "		  download_nontarget\t\tonly download NCBI non-target genome assemblies\n"
+	echo -e "		Run full gRNA and primer design pipeline"
+	echo -e	"		  ncbi_all_subsample\t\tdownload target and non-target genomes from NCBI; run subsampling"
+	echo -e	"		  ncbi_all_nosubsample\t\tdownload target and non-target genomes from NCBI; no subsampling"
+	echo -e	"		  user_target_subsample\t\tuser-provided target genomes; download non-target genomes from NCBI; run subsampling"
+	echo -e	"		  user_target_nosubsample\tuser-provided target genomes, download non-target genomes from NCBI; no subsampling"
+	echo -e	"		  user_all_subsample\t\tuser-provided target and non-target genomes; run subsampling"
+	echo -e	"		  user_all_nosubsample\t\tuser-provided target and non-target genomes; no subsampling\n"
+	echo -e	"	-o	Output directory\n"
+	echo "Optional:"
+	echo -e   "	-r	Reference genome GenBank file for training and annotation (pangenome method only)"
+	echo -e	  "	-t 	Number of cpus"
+	echo -e "	-h      Print this help menu\n"
+	exit 0
+}
+
+
+# Activate conda environment
+conda_path=$(which conda | rev | cut -d'/' -f3- | rev)
+source "$conda_path"/etc/profile.d/conda.sh
+source "$conda_path"/etc/profile.d/mamba.sh
+
+source $CONDA_PREFIX/bin/pathogd_functions.sh
+
+error_exit() {
+	echo "Error: $1" 1>&2
+	exit 1
+}
+
+logger() {
+	echo "[$(date +"%F %T")] INFO: $1" >> $LOG
+}
+
+
+if [[ $# -lt 6 ]]
+then
+	   usage
+	   exit 0
+else
+		while getopts "c:p:a:m:w:o:r:t:h" opt
+		do
+			case $opt in
+				c) IN=$OPTARG;;
+				p) CAS=$OPTARG;;
+				a) AMP_METHOD=$OPTARG;;
+				m) METHOD=$OPTARG;;
+				w) MODE=$OPTARG;;
+				r) REF=$OPTARG;;
+				o) OUT=$OPTARG;;
+				t) CPU=$OPTARG;;
+				h) usage;;
+				\?) echo -e "\nInvalid option: -$OPTARG"
+					usage;;
+				:) echo -e "\nOption -$OPTARG requires an argument!\n"
+					exit 0;;
+			esac
+		done
+		shift $(( OPTIND - 1 ))
+fi
+
+
+# Exit if mandatory arguments missing
+
+if [[ -z "$IN" ]]; then
+	echo -e "\nInput config file \"-c\" must be specified!\n"
+	usage
+fi
+
+# if [[ -z "$CAS" ]]; then
+# 	echo -e "\nCas nuclease type \"-p\" must be specified!\n"
+# 	usage
+# fi
+
+if [[ -z "$MODE" ]]; then
+	echo -e "\nWorkflow \"-w\" must be specified!\n"
+	usage
+fi
+
+if [[ -z "$OUT" ]]; then
+	echo -e "\nOutput directory \"-o\" must be specified!\n"
+	usage
+fi
+
+if [[ -z "$CAS" ]]; then
+	CAS="cas12"
+fi
+
+if [[ -z "$AMP_METHOD" ]]; then
+	AMP_METHOD="rpa"
+fi
+
+
+if [[ "$MODE" != "check" ]] && [[ "$MODE" != "download_target" ]] && [[ "$MODE" != "download_nontarget" ]]; then
+	if [[ -z "$METHOD" ]]; then
+		echo -e "\nModule \"-m\" must be specified for workflows other than 'check', 'download_target', and 'download_nontarget'!\n"
+		usage
+	fi
+fi
+
+
+# Define working and output directories
+MYDIR=$PWD
+
+OUTPUT=$MYDIR/$OUT
+GENOMES_TARGET=$OUTPUT/genomes_target
+GENOMES_OFFTARGET=$OUTPUT/genomes_offtarget
+OUT_METADATA=$OUTPUT/metadata
+PANGENOME=$OUTPUT/pangenome
+KMER_TARGET=$OUTPUT/kmers_target
+KMER_OFFTARGET=$OUTPUT/kmers_offtarget
+KMER_TARGET_PAM=$OUTPUT/kmers_target_pam
+KMER_FINAL=$OUTPUT/kmers_results
+ALIGN_OUT=$OUTPUT/align_out
+COORD_OUT=$OUTPUT/coord_out
+AMPLICON=$OUTPUT/amplicons
+PRIMERS=$OUTPUT/primers
+LOG=$OUTPUT/pathogd.log
+DATABASE=$MYDIR/database
+
+# Unbound variable when executing without `-t`
+if [[ ! -z "${CPU+x}" ]]; then
+	CPU_CORES="$CPU"
+else
+	CPU_CORES=8
+fi
+
+MAX_JOBS=$((CPU_CORES - 1))
+MAX_THREADS_PER_JOB=4
+MAX_PARALLEL_JOBS=$((MAX_JOBS/2))
+
+#echo "Number of cores is $(nproc)"
+#echo "Max jobs is "$MAX_JOBS""
+#echo "Max threads per job is "$MAX_THREADS_PER_JOB""
+#echo "Max parallel jobs is "$MAX_PARALLEL_JOBS""
+
+
+# Create output dir if it doesn't exist
+[[ ! -d "$OUTPUT" ]] && mkdir -p $OUTPUT
+cp $MYDIR/$IN $OUTPUT
+
+# Otherwise does not work with absolute or relative paths!
+IN=$(basename $IN)
+
+## Parse config file
+awk -F "|" '/\|/ && $2 ~ /[^\s]+/ {print $1, $2}' OFS="\t" "$OUTPUT"/"$IN" > "$OUTPUT"/params.tsv
+
+while IFS=$'\t' read -r name value; do 
+	declare "$name=$value"
+done < "$OUTPUT"/params.tsv
+
+kmerpam=$((kmer + 4))
+
+target=$target_species 
+target_taxid=$target_species_taxid
+offtarget=$offtarget_species
+offtarget_taxid=$offtarget_species_taxid
+
+
+( [[ -n "${target_species:-}" ]] && logger "Your target species is '$target_species'" ) || ( [[ -n "${target_taxid:-}" ]] && logger "Your target species taxid is '$target_taxid'" ) || logger "Target is not defined"
+
+logger "Your output directory is: '"$OUTPUT"'"
+logger "Using "$CPU_CORES" threads"
+
+# If nosubsample workflow selected, reset subsampled variable to no
+if [ $MODE == "ncbi_all_nosubsample" ] ||  [ $MODE == "user_all_nosubsample" ] || [ $MODE == "user_target_nosubsample" ]; then
+	  subsample="no"
+fi
+
+
+# Taxonkit requires the NCBI taxonomy installed!
+# Taxonkit does not seem to work with environment variable
+# despite the suggestions in the read
+TAXONKIT_DB="$HOME/.taxonkit"
+if [ ! -f "$HOME/.taxonkit/names.dmp" ] || [ ! -f "$HOME/.taxonkit/nodes.dmp" ] ||  [ ! -f "$HOME/.taxonkit/delnodes.dmp" ] ||  [ ! -f "$HOME/.taxonkit/merged.dmp" ]; then
+	ncbi_taxdir="$OUTPUT/ncbi_tax"
+	if [ ! -f "$ncbi_taxdir/names.dmp" ] || [ ! -f "$ncbi_taxdir/nodes.dmp" ] || [ ! -f  "$ncbi_taxdir/delnodes.dmp" ] ||  [ ! -f  "$ncbi_taxdir/merged.dmp" ]; then
+		echo "Taxonkit taxdump not found in output directory, creating directory and downloading latest NCBI Taxonomy"
+		mkdir -p $ncbi_taxdir
+		wget ftp://ftp.ncbi.nih.gov/pub/taxonomy/taxdump.tar.gz  --output-document="$ncbi_taxdir/taxdump.tar.gz"
+		tar xf "$ncbi_taxdir/taxdump.tar.gz" -C "$ncbi_taxdir"
+	fi
+	TAXONKIT_DB="$ncbi_taxdir"
+fi
+
+
+# Consolidated functions
+norun_workflow() {
+	logger "Starting '"$MODE"' workflow"
+}
+
+start_workflow() {
+	logger "Starting '"$METHOD"' approach with '"$MODE"' workflow"
+}
+
+complete_workflow() {
+	logger "'"$METHOD"' approach with '"$MODE"' workflow complete!"
+	logger "pathogd results written to: '"$OUTPUT"'/pathogd_primers_stats.tsv"
+}
+
+process_guides() {
+	if [[ $CAS == "cas12" ]]; then
+		get_guides_pam_cas12a
+		get_kmers_offtarget
+		get_kmers_offtarget_pam
+	elif [[ $CAS == "cas13" ]]; then
+		get_guides_nopam
+		get_kmers_offtarget
+	fi
+}
+
+process_uniq_kmers() {
+	if [[ $CAS == "cas12" ]]; then
+		get_kmers_target_pam
+		get_uniq_target_kmer_withpam
+	elif [[ $CAS == "cas13" ]]; then
+		get_uniq_target_kmer_nopam
+	fi
+}
+
+process_genome_option() {
+	if [[ $MODE == "ncbi_all_subsample" ]]; then
+		download_and_process_allgenomes
+		subsample_genomes
+	elif [[ $MODE == "ncbi_all_nosubsample" ]]; then
+		download_and_process_allgenomes
+	elif [[ $MODE == "user_target_subsample" ]]; then
+		download_and_process_nontargetonly
+		subsample_genomes
+	elif [[ $MODE == "user_target_nosubsample" ]]; then
+		download_and_process_nontargetonly
+	elif [[ $MODE == "user_all_subsample" ]]; then
+		process_only
+		subsample_genomes
+	elif [[ $MODE == "user_all_nosubsample" ]]; then
+		process_only
+	else
+		error_exit "'"$MODE"' not found!"
+	fi 
+}
+
+process_pangenome() {
+	get_pangenome
+	species_specific_genes
+	align_species_specific
+}
+
+find_guides_pangenome() {
+	if [[ $CAS == "cas12" ]]; then
+		get_guides_pam_cas12a
+		get_kmers_offtarget
+		get_kmers_offtarget_pam
+	elif [[ $CAS == "cas13" ]]; then
+		get_guides_nopam
+		get_kmers_offtarget
+	fi
+}
+
+parse_guides_pangenome() {
+	precheck_guides_pangenome
+	create_p3_input_pangenome
+	run_p3
+	parse_p3_output_pangenome
+}
+
+postprocess_pangenome() {
+	run_fast_ispcr pangenome
+	guide_sensitivity
+	guide_specificity
+	get_primerstats
+	clean_files pangenome
+}
+
+kmer_primer_design() {
+	get_guide_coordinates
+	split_amplicons
+	process_individual_guides
+	
+	create_p3_input
+	run_p3
+	parse_p3_output
+	run_fast_ispcr kmer
+	guide_sensitivity
+	guide_specificity
+
+	primer_orientation_cas13
+	get_primerstats
+	clean_files kmer
+	complete_workflow
+}
+
+kmer_noprimerdesign() {
+	complete_workflow
+	logger "pathogd kmer guide results written to: '"$OUTPUT"'/uniq_target_kmers_final_prevalence_shortlisted.tsv"
+}
+
+download_and_process_allgenomes() {
+	download_target_genomes
+	download_nontarget_genomes
+	remove_overlap_genomes
+	decompress_genomes target
+	decompress_genomes offtarget
+	prepare_human_genome
+}
+
+download_and_process_targetonly() {
+	download_target_genomes
+	remove_overlap_genomes
+	decompress_genomes target
+	decompress_genomes offtarget
+	prepare_human_genome
+}
+
+download_and_process_nontargetonly() {
+	download_nontarget_genomes
+	remove_overlap_genomes
+	decompress_genomes target
+	decompress_genomes offtarget
+	prepare_human_genome
+}
+
+process_only() {
+	decompress_genomes target
+	decompress_genomes offtarget
+	prepare_human_genome
+}
+
+
+# Rules here
+if [[ $MODE == "check" ]]; then
+	norun_workflow
+	check_assemblies_taxid
+	logger "pathogd 'check' workflow complete"
+
+elif [[ $MODE == "download_target" ]]; then
+	norun_workflow
+	download_target_genomes
+	logger "pathogd 'download target' workflow complete"
+
+elif [[ $MODE == "download_nontarget" ]]; then
+	norun_workflow
+	download_nontarget_genomes
+	logger "pathogd 'download non-target' workflow complete"
+
+elif [[ $METHOD == "pangenome" ]]; then
+	start_workflow
+	process_genome_option
+	process_pangenome
+	find_guides_pangenome
+	parse_guides_pangenome
+	postprocess_pangenome
+	complete_workflow
+
+elif [[ $METHOD == "kmer" ]]; then
+	if [[ $primer_design == "yes" ]]; then
+		start_workflow
+		process_genome_option
+		get_kmers_offtarget
+		get_kmers_target
+		process_uniq_kmers
+		precheck_guides
+		kmer_primer_design
+	else
+		start_workflow
+		process_genome_option
+		get_kmers_offtarget
+		get_kmers_target
+		process_uniq_kmers
+		precheck_guides
+		kmer_noprimerdesign
+	fi
+
+else
+	error_exit "'"$METHOD"' method and '"$MODE"' workflow combination not recognized!"
+fi

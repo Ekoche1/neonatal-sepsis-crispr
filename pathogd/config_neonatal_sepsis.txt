@@ -1,0 +1,14 @@
+db|genbank
+target_species|Escherichia coli,Klebsiella pneumoniae,Staphylococcus aureus,Streptococcus agalactiae
+target_species_taxid|562,573,1280,1311
+offtarget_species|Enterobacter cloacae,Salmonella enterica
+offtarget_species_taxid|550,28901
+domain|bacteria
+assembly_level|complete
+kmer|22
+threshold|80
+mismatch|yes
+primer_design|yes
+ref_annot|no
+subsample|5
+roary_env|roary

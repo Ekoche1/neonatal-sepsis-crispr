@@ -1,0 +1,5 @@
+[2025-10-17 15:00:59] INFO: Your target species is 'Escherichia coli,Klebsiella pneumoniae,Staphylococcus aureus,Streptococcus agalactiae'
+[2025-10-17 15:00:59] INFO: Your output directory is: '/workspaces/neonatal-sepsis-crispr/pathogd/nigeria_sepsis_results'
+[2025-10-17 15:00:59] INFO: Using 8 threads
+[2025-10-17 15:01:05] INFO: Starting 'kmer' approach with 'ncbi_all_subsample' workflow
+[2025-10-17 15:01:11] INFO: Downloading target genomes using target species taxids

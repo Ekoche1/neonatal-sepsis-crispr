@@ -1,0 +1,29 @@
+name: pathogd
+channels:
+  - r
+  - bioconda
+  - conda-forge
+dependencies:
+  - conda-forge::biopython
+  - bbmap
+  - bedtools
+  - cd-hit
+  - cdbtools
+  - csvtk
+  - emboss
+  - genometester4
+  - ispcr
+  - mafft
+  - ncbi-genome-download=0.3.3
+  - parallel
+  - primer3=2.6.1
+  - prodigal
+  - r-data.table
+  - conda-forge::r-dplyr
+  - r-tidyr
+  - samtools
+  - seqkit
+  - pigz
+  - r-stringr
+  - taxonkit
+  - prokka
